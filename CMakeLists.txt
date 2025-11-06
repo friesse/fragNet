@@ -53,32 +53,61 @@ set(FETCHCONTENT_QUIET FALSE)
 #-------------------------------------------------
 # cryptopp-cmake
 #-------------------------------------------------
+set(CRYPTOPP_BUILD_TESTING OFF CACHE BOOL "Disable cryptopp tests")
+set(CRYPTOPP_INSTALL OFF CACHE BOOL "Disable cryptopp installation")
 
-# Try to find system cryptopp first
+# First try to find system cryptopp
 find_package(PkgConfig QUIET)
 if(PkgConfig_FOUND)
     pkg_check_modules(CRYPTOPP QUIET libcrypto++)
+    if(CRYPTOPP_FOUND)
+        message(STATUS "Found system cryptopp: ${CRYPTOPP_VERSION}")
+        add_library(cryptopp::cryptopp INTERFACE IMPORTED)
+        set_target_properties(cryptopp::cryptopp PROPERTIES
+            INTERFACE_INCLUDE_DIRECTORIES "${CRYPTOPP_INCLUDE_DIRS}"
+            INTERFACE_LINK_LIBRARIES "${CRYPTOPP_LIBRARIES}"
+        )
+        message(STATUS "Created cryptopp::cryptopp target from system installation")
+    endif()
 endif()
 
-# If system package found, create an imported target
-if(CRYPTOPP_FOUND)
-    message(STATUS "Found system cryptopp: ${CRYPTOPP_VERSION}")
-    add_library(cryptopp INTERFACE IMPORTED)
-    set_target_properties(cryptopp PROPERTIES
-        INTERFACE_INCLUDE_DIRECTORIES "${CRYPTOPP_INCLUDE_DIRS}"
-        INTERFACE_LINK_LIBRARIES "${CRYPTOPP_LIBRARIES}"
-    )
-else()
-    # Fall back to FetchContent
+# If system package not found, use FetchContent
+if(NOT TARGET cryptopp::cryptopp)
     message(STATUS "System cryptopp not found, using FetchContent")
-    option(CRYPTOPP_BUILD_TESTING "Build library tests" OFF)
-    option(CRYPTOPP_INSTALL "Generate the install target for this project." OFF)
     
-    FetchContent_Declare(cryptopp-cmake 
-        GIT_REPOSITORY https://github.com/abdes/cryptopp-cmake 
+    # Clear any previous cryptopp variables
+    unset(CRYPTOPP_FOUND CACHE)
+    unset(CRYPTOPP_INCLUDE_DIR CACHE)
+    unset(CRYPTOPP_LIBRARIES CACHE)
+    
+    # Use FetchContent to get cryptopp-cmake
+    include(FetchContent)
+    FetchContent_Declare(
+        cryptopp-cmake
+        GIT_REPOSITORY https://github.com/abdes/cryptopp-cmake.git
+        GIT_TAG master
         GIT_SHALLOW TRUE
     )
+    
+    # Prevent cryptopp-cmake from building tests and examples
+    set(CRYPTOPP_BUILD_TESTING OFF CACHE BOOL "" FORCE)
+    set(CRYPTOPP_INSTALL OFF CACHE BOOL "" FORCE)
+    set(CRYPTOPP_BUILD_DOCUMENTATION OFF CACHE BOOL "" FORCE)
+    
+    # Make cryptopp-cmake available
     FetchContent_MakeAvailable(cryptopp-cmake)
+    
+    if(NOT TARGET cryptopp::cryptopp)
+        message(STATUS "cryptopp::cryptopp target still not found, trying to create it manually")
+        if(TARGET cryptopp)
+            add_library(cryptopp::cryptopp ALIAS cryptopp)
+            message(STATUS "Created cryptopp::cryptopp alias from cryptopp target")
+        endif()
+    endif()
+    
+    if(NOT TARGET cryptopp::cryptopp)
+        message(WARNING "Failed to set up cryptopp::cryptopp target")
+    endif()
 endif()
 
 #-------------------------------------------------

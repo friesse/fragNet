@@ -61,29 +61,52 @@ target_link_libraries(gc-server PRIVATE
 
 # Link cryptopp (from system, vcpkg, or FetchContent)
 message(STATUS "Searching for cryptopp library...")
-message(STATUS "CMAKE_FIND_PACKAGE_NAME: ${CMAKE_FIND_PACKAGE_NAME}")
 
-get_target_property(cryptopp_aliases cryptopp ALIASED_TARGET)
-message(STATUS "cryptopp_aliases: ${cryptopp_aliases}")
-
+# First check if we have the target from the main CMakeLists
 if(TARGET cryptopp::cryptopp)
     message(STATUS "Linking cryptopp::cryptopp")
     target_link_libraries(gc-server PRIVATE cryptopp::cryptopp)
+elseif(TARGET cryptopp)
+    message(STATUS "Linking cryptopp target")
+    target_link_libraries(gc-server PRIVATE cryptopp)
 elseif(TARGET cryptopp-static)
     message(STATUS "Linking cryptopp-static")
     target_link_libraries(gc-server PRIVATE cryptopp-static)
-elseif(TARGET cryptopp)
-    message(STATUS "Linking cryptopp")
-    target_link_libraries(gc-server PRIVATE cryptopp)
 else()
     # Try to find cryptopp using find_package as a last resort
+    message(STATUS "Trying to find cryptopp using find_package...")
     find_package(cryptopp QUIET)
+    
     if(TARGET cryptopp::cryptopp)
-        message(STATUS "Found cryptopp via find_package")
+        message(STATUS "Found cryptopp::cryptopp via find_package")
         target_link_libraries(gc-server PRIVATE cryptopp::cryptopp)
     else()
+        # If we still don't have a target, try to find the library directly
+        find_package(PkgConfig QUIET)
+        if(PkgConfig_FOUND)
+            pkg_check_modules(CRYPTOPP QUIET libcrypto++)
+            if(CRYPTOPP_FOUND)
+                message(STATUS "Found cryptopp via pkg-config: ${CRYPTOPP_LIBRARIES}")
+                target_include_directories(gc-server PRIVATE ${CRYPTOPP_INCLUDE_DIRS})
+                target_link_libraries(gc-server PRIVATE ${CRYPTOPP_LIBRARIES})
+                return()
+            endif()
+        endif()
+        
+        # If we get here, we couldn't find cryptopp
+        message(STATUS "Available targets in current scope:")
+        get_property(targets DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR} PROPERTY BUILDSYSTEM_TARGETS)
+        foreach(target ${targets})
+            message(STATUS "  - ${target}")
+        endforeach()
+        
         message(FATAL_ERROR "cryptopp library not found! Please ensure cryptopp is installed or use FetchContent.")
     endif()
+endif()
+
+# Add include directories if they're not already included
+if(CRYPTOPP_INCLUDE_DIRS)
+    target_include_directories(gc-server PRIVATE ${CRYPTOPP_INCLUDE_DIRS})
 endif()
 
 # Platform-specific libraries
