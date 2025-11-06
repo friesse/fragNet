@@ -12,7 +12,8 @@ jobs:
     runs-on: ${{ matrix.os }}
 
     env:
-      SCCACHE_GHA_ENABLED: "true"
+      # Disable SCCache due to GitHub Actions cache service issues
+      SCCACHE_GHA_ENABLED: "false"
 
     strategy:
       fail-fast: false
@@ -41,9 +42,10 @@ jobs:
           pkg-config \
           git
 
-    - if: matrix.os != 'windows-latest'
-      name: Setup sccache (Linux/Mac)
-      uses: mozilla-actions/sccache-action@v0.0.6
+    # Temporarily disabled SCCache due to GitHub Actions cache service issues
+    # - if: matrix.os != 'windows-latest'
+    #   name: Setup sccache (Linux/Mac)
+    #   uses: mozilla-actions/sccache-action@v0.0.6
 
     # Linux Build
     - if: matrix.os == 'ubuntu-latest'
@@ -53,10 +55,10 @@ jobs:
         mkdir -p ${{ github.workspace }}/release
         cd ${{ github.workspace }}/build
         cmake .. -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} \
-                 -DCMAKE_C_COMPILER_LAUNCHER=sccache \
-                 -DCMAKE_CXX_COMPILER_LAUNCHER=sccache \
                  -DCRYPTOPP_BUILD_TESTING=OFF \
-                 -DCRYPTOPP_INSTALL=OFF
+                 -DCRYPTOPP_INSTALL=OFF \
+                 -Dprotobuf_BUILD_TESTS=OFF \
+                 -Dprotobuf_WITH_ZLIB=OFF
     
     - if: matrix.os == 'ubuntu-latest'
       name: Build (Linux)
