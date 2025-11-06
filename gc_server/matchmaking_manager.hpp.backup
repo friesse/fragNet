@@ -1,0 +1,188 @@
+#pragma once
+
+#include <vector>
+#include <map>
+#include <queue>
+#include <memory>
+#include <chrono>
+#include <string>
+#include "steam/steam_api.h"
+#include "cc_gcmessages.pb.h"
+#include "cstrike15_gcmessages.pb.h"
+
+// Forward declarations
+class GCNetwork;
+
+// Match states
+enum class MatchState {
+    QUEUED,
+    WAITING_FOR_CONFIRMATION,
+    IN_PROGRESS,
+    COMPLETED,
+    ABANDONED
+};
+
+// Player skill rating structure
+struct PlayerSkillRating {
+    uint32_t rank = 0;      // 0-18 for CS:GO ranks (Silver 1 to Global Elite)
+    uint32_t wins = 0;
+    uint32_t mmr = 1000;    // Matchmaking rating (hidden)
+    uint32_t level = 1;     // Player level
+};
+
+// Queue entry for a single player
+struct QueueEntry {
+    uint64_t steamId;
+    uint32_t accountId;
+    SNetSocket_t socket;
+    std::chrono::steady_clock::time_point queueTime;
+    PlayerSkillRating skillRating;
+    std::vector<std::string> preferredMaps;
+    bool isPrime = false;
+    bool acceptedMatch = false;
+    std::string region = "na"; // Region preference
+    
+    QueueEntry(uint64_t id, SNetSocket_t sock) : 
+        steamId(id), 
+        accountId(id & 0xFFFFFFFF),
+        socket(sock),
+        queueTime(std::chrono::steady_clock::now()) {}
+};
+
+// Match structure
+struct Match {
+    uint64_t matchId;
+    std::string matchToken;
+    std::vector<std::shared_ptr<QueueEntry>> teamA;
+    std::vector<std::shared_ptr<QueueEntry>> teamB;
+    MatchState state;
+    std::string mapName;
+    std::string serverAddress;
+    uint16_t serverPort;
+    std::chrono::steady_clock::time_point createdTime;
+    std::chrono::steady_clock::time_point readyUpDeadline;
+    uint32_t avgMMR;
+    
+    Match() : 
+        matchId(0),
+        state(MatchState::QUEUED),
+        serverPort(0),
+        createdTime(std::chrono::steady_clock::now()),
+        avgMMR(1000) {}
+        
+    bool AllPlayersAccepted() const {
+        for (const auto& player : teamA) {
+            if (!player->acceptedMatch) return false;
+        }
+        for (const auto& player : teamB) {
+            if (!player->acceptedMatch) return false;
+        }
+        return true;
+    }
+    
+    size_t GetAcceptedCount() const {
+        size_t count = 0;
+        for (const auto& player : teamA) {
+            if (player->acceptedMatch) count++;
+        }
+        for (const auto& player : teamB) {
+            if (player->acceptedMatch) count++;
+        }
+        return count;
+    }
+};
+
+class MatchmakingManager {
+private:
+    // Singleton instance
+    static MatchmakingManager* s_instance;
+    
+    // Player queues by skill bracket
+    std::map<uint32_t, std::vector<std::shared_ptr<QueueEntry>>> m_queuesBySkill;
+    
+    // Active matches
+    std::map<uint64_t, std::shared_ptr<Match>> m_activeMatches;
+    
+    // Player to match mapping
+    std::map<uint64_t, uint64_t> m_playerToMatch;
+    
+    // Match ID counter
+    uint64_t m_nextMatchId;
+    
+    // Configuration
+    const size_t PLAYERS_PER_TEAM = 5;
+    const size_t MAX_SKILL_DIFFERENCE = 3; // Max rank difference for matchmaking
+    const std::chrono::seconds READY_UP_TIME{30};
+    const std::chrono::seconds QUEUE_CHECK_INTERVAL{5};
+    
+    // Maps pool
+    std::vector<std::string> m_mapPool = {
+        "de_dust2",
+        "de_mirage", 
+        "de_inferno",
+        "de_nuke",
+        "de_overpass",
+        "de_cache",
+        "de_train",
+        "de_vertigo",
+        "de_ancient"
+    };
+    
+    // Private constructor for singleton
+    MatchmakingManager();
+    
+    // Helper functions
+    uint32_t GetSkillBracket(uint32_t mmr) const;
+    bool ArePlayersCompatible(const QueueEntry& p1, const QueueEntry& p2) const;
+    std::string SelectMapForMatch(const std::vector<std::shared_ptr<QueueEntry>>& players) const;
+    void NotifyMatchFound(const Match& match);
+    void NotifyMatchReady(const Match& match);
+    void CancelMatch(uint64_t matchId, const std::string& reason);
+    std::string GenerateMatchToken();
+    
+public:
+    // Singleton access
+    static MatchmakingManager* GetInstance();
+    static void Destroy();
+    
+    // Queue management
+    bool AddPlayerToQueue(uint64_t steamId, SNetSocket_t socket, const PlayerSkillRating& rating, 
+                         const std::vector<std::string>& preferredMaps = {});
+    bool RemovePlayerFromQueue(uint64_t steamId);
+    bool IsPlayerInQueue(uint64_t steamId) const;
+    size_t GetQueueSize() const;
+    
+    // Match management
+    void ProcessMatchmakingQueue();
+    bool AcceptMatch(uint64_t steamId);
+    bool DeclineMatch(uint64_t steamId);
+    void UpdateMatchState(uint64_t matchId, MatchState newState);
+    std::shared_ptr<Match> GetMatchByPlayer(uint64_t steamId);
+    std::shared_ptr<Match> GetMatch(uint64_t matchId);
+    
+    // Player information
+    PlayerSkillRating GetPlayerRating(uint64_t steamId, MYSQL* db);
+    void UpdatePlayerRating(uint64_t steamId, const PlayerSkillRating& newRating, MYSQL* db);
+    
+    // Message builders
+    void BuildMatchmakingHello(CMsgGCCStrike15_v2_MatchmakingGC2ClientHello& message, uint64_t steamId, MYSQL* db);
+    void BuildMatchReservation(CMsgGCCStrike15_v2_MatchmakingGC2ClientReserve& message, const Match& match, uint64_t steamId);
+    void BuildMatchUpdate(CMsgGCCStrike15_v2_MatchmakingGC2ClientUpdate& message, const Match& match);
+    
+    // Periodic updates
+    void Update();
+    void CleanupAbandonedMatches();
+    void CheckReadyUpTimeouts();
+    
+    // Statistics
+    struct QueueStatistics {
+        size_t totalPlayers;
+        std::map<uint32_t, size_t> playersByRank;
+        std::chrono::seconds avgWaitTime;
+        size_t activeMatches;
+    };
+    QueueStatistics GetQueueStatistics() const;
+    
+    // Destructor
+    ~MatchmakingManager();
+};

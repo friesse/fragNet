@@ -47,11 +47,39 @@ else()
     endif()
 endif()
 
-add_subdirectory(gc_server)
-add_subdirectory(steamworks)
-
 include(FetchContent)
 set(FETCHCONTENT_QUIET FALSE)
+
+#-------------------------------------------------
+# cryptopp-cmake
+#-------------------------------------------------
+
+# Try to find system cryptopp first
+find_package(PkgConfig QUIET)
+if(PkgConfig_FOUND)
+    pkg_check_modules(CRYPTOPP QUIET libcrypto++)
+endif()
+
+# If system package found, create an imported target
+if(CRYPTOPP_FOUND)
+    message(STATUS "Found system cryptopp: ${CRYPTOPP_VERSION}")
+    add_library(cryptopp INTERFACE IMPORTED)
+    set_target_properties(cryptopp PROPERTIES
+        INTERFACE_INCLUDE_DIRECTORIES "${CRYPTOPP_INCLUDE_DIRS}"
+        INTERFACE_LINK_LIBRARIES "${CRYPTOPP_LIBRARIES}"
+    )
+else()
+    # Fall back to FetchContent
+    message(STATUS "System cryptopp not found, using FetchContent")
+    option(CRYPTOPP_BUILD_TESTING "Build library tests" OFF)
+    option(CRYPTOPP_INSTALL "Generate the install target for this project." OFF)
+    
+    FetchContent_Declare(cryptopp-cmake 
+        GIT_REPOSITORY https://github.com/abdes/cryptopp-cmake 
+        GIT_SHALLOW TRUE
+    )
+    FetchContent_MakeAvailable(cryptopp-cmake)
+endif()
 
 #-------------------------------------------------
 # mariadb
@@ -102,34 +130,6 @@ option(protobuf_WITH_ZLIB "Build with zlib support" OFF)
 
 FetchContent_Declare(protobuf GIT_REPOSITORY https://github.com/protocolbuffers/protobuf GIT_TAG 21.x GIT_SHALLOW TRUE)
 FetchContent_MakeAvailable(protobuf)
-
-#-------------------------------------------------
-# cryptopp-cmake
-#-------------------------------------------------
-
-# Try to find system cryptopp first
-find_package(PkgConfig QUIET)
-if(PkgConfig_FOUND)
-    pkg_check_modules(CRYPTOPP QUIET libcrypto++)
-endif()
-
-# If system package found, create an imported target
-if(CRYPTOPP_FOUND)
-    message(STATUS "Found system cryptopp: ${CRYPTOPP_VERSION}")
-    add_library(cryptopp INTERFACE IMPORTED)
-    set_target_properties(cryptopp PROPERTIES
-        INTERFACE_INCLUDE_DIRECTORIES "${CRYPTOPP_INCLUDE_DIRS}"
-        INTERFACE_LINK_LIBRARIES "${CRYPTOPP_LIBRARIES}"
-    )
-else()
-    # Fall back to FetchContent
-    message(STATUS "System cryptopp not found, using FetchContent")
-    option(CRYPTOPP_BUILD_TESTING "Build library tests" OFF)
-    option(CRYPTOPP_INSTALL "Generate the install target for this project." OFF)
-    
-    FetchContent_Declare(cryptopp-cmake GIT_REPOSITORY https://github.com/abdes/cryptopp-cmake GIT_SHALLOW TRUE)
-    FetchContent_MakeAvailable(cryptopp-cmake)
-endif()
 
 add_definitions(-DSTEAM_API_EXPORTS)
 

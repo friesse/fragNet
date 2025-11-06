@@ -1,0 +1,634 @@
+#include "matchmaking_manager.hpp"
+#include "networking.hpp"
+#include "gameserver_manager.hpp"
+#include "logger.hpp"
+#include <algorithm>
+#include <random>
+#include <sstream>
+#include <iomanip>
+
+// Initialize singleton instance
+MatchmakingManager* MatchmakingManager::s_instance = nullptr;
+
+MatchmakingManager::MatchmakingManager() : m_nextMatchId(1) {
+    // Game servers will register themselves via the SourceMod plugin
+    logger::info("MatchmakingManager initialized");
+}
+
+MatchmakingManager::~MatchmakingManager() {
+    // Clean up
+    m_queuesBySkill.clear();
+    m_activeMatches.clear();
+    m_playerToMatch.clear();
+}
+
+MatchmakingManager* MatchmakingManager::GetInstance() {
+    if (!s_instance) {
+        s_instance = new MatchmakingManager();
+    }
+    return s_instance;
+}
+
+void MatchmakingManager::Destroy() {
+    if (s_instance) {
+        delete s_instance;
+        s_instance = nullptr;
+    }
+}
+
+uint32_t MatchmakingManager::GetSkillBracket(uint32_t mmr) const {
+    // Group players into skill brackets based on MMR
+    // This creates wider matchmaking pools
+    return mmr / 200; // Each bracket represents 200 MMR range
+}
+
+bool MatchmakingManager::ArePlayersCompatible(const QueueEntry& p1, const QueueEntry& p2) const {
+    // Check if two players can be matched together
+    uint32_t mmrDiff = std::abs((int)p1.skillRating.mmr - (int)p2.skillRating.mmr);
+    
+    // Allow wider MMR range for longer queue times
+    auto now = std::chrono::steady_clock::now();
+    auto p1WaitTime = std::chrono::duration_cast<std::chrono::seconds>(now - p1.queueTime).count();
+    auto p2WaitTime = std::chrono::duration_cast<std::chrono::seconds>(now - p2.queueTime).count();
+    auto maxWaitTime = std::max(p1WaitTime, p2WaitTime);
+    
+    // Expand MMR range based on wait time (100 MMR per 30 seconds)
+    uint32_t maxMMRDiff = 300 + (maxWaitTime / 30) * 100;
+    
+    if (mmrDiff > maxMMRDiff) return false;
+    
+    // Check prime status compatibility
+    if (p1.isPrime != p2.isPrime) return false;
+    
+    // Check region compatibility
+    if (p1.region != p2.region) return false;
+    
+    return true;
+}
+
+bool MatchmakingManager::AddPlayerToQueue(uint64_t steamId, SNetSocket_t socket, 
+                                         const PlayerSkillRating& rating,
+                                         const std::vector<std::string>& preferredMaps) {
+    // Remove player from queue if already queued
+    RemovePlayerFromQueue(steamId);
+    
+    auto entry = std::make_shared<QueueEntry>(steamId, socket);
+    entry->skillRating = rating;
+    entry->preferredMaps = preferredMaps.empty() ? m_mapPool : preferredMaps;
+    
+    uint32_t bracket = GetSkillBracket(rating.mmr);
+    m_queuesBySkill[bracket].push_back(entry);
+    
+    logger::info("Player %llu added to matchmaking queue (MMR: %u, Bracket: %u)", 
+                 steamId, rating.mmr, bracket);
+    
+    // Try to create matches immediately
+    ProcessMatchmakingQueue();
+    
+    return true;
+}
+
+bool MatchmakingManager::RemovePlayerFromQueue(uint64_t steamId) {
+    for (auto& [bracket, queue] : m_queuesBySkill) {
+        auto it = std::remove_if(queue.begin(), queue.end(),
+            [steamId](const std::shared_ptr<QueueEntry>& entry) {
+                return entry->steamId == steamId;
+            });
+        
+        if (it != queue.end()) {
+            queue.erase(it, queue.end());
+            logger::info("Player %llu removed from matchmaking queue", steamId);
+            return true;
+        }
+    }
+    return false;
+}
+
+bool MatchmakingManager::IsPlayerInQueue(uint64_t steamId) const {
+    for (const auto& [bracket, queue] : m_queuesBySkill) {
+        for (const auto& entry : queue) {
+            if (entry->steamId == steamId) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+size_t MatchmakingManager::GetQueueSize() const {
+    size_t total = 0;
+    for (const auto& [bracket, queue] : m_queuesBySkill) {
+        total += queue.size();
+    }
+    return total;
+}
+
+void MatchmakingManager::ProcessMatchmakingQueue() {
+    // Collect all players from all brackets
+    std::vector<std::shared_ptr<QueueEntry>> allPlayers;
+    for (auto& [bracket, queue] : m_queuesBySkill) {
+        allPlayers.insert(allPlayers.end(), queue.begin(), queue.end());
+    }
+    
+    if (allPlayers.size() < PLAYERS_PER_TEAM * 2) {
+        return; // Not enough players for a match
+    }
+    
+    // Sort players by MMR for balanced matching
+    std::sort(allPlayers.begin(), allPlayers.end(),
+        [](const std::shared_ptr<QueueEntry>& a, const std::shared_ptr<QueueEntry>& b) {
+            return a->skillRating.mmr < b->skillRating.mmr;
+        });
+    
+    // Try to create matches
+    std::vector<std::shared_ptr<QueueEntry>> matchPool;
+    
+    for (size_t i = 0; i < allPlayers.size(); ++i) {
+        matchPool.clear();
+        matchPool.push_back(allPlayers[i]);
+        
+        // Find compatible players
+        for (size_t j = i + 1; j < allPlayers.size() && matchPool.size() < PLAYERS_PER_TEAM * 2; ++j) {
+            bool compatible = true;
+            for (const auto& player : matchPool) {
+                if (!ArePlayersCompatible(*player, *allPlayers[j])) {
+                    compatible = false;
+                    break;
+                }
+            }
+            
+            if (compatible) {
+                matchPool.push_back(allPlayers[j]);
+            }
+        }
+        
+        // If we have enough players, create a match
+        if (matchPool.size() == PLAYERS_PER_TEAM * 2) {
+            // Find an available server from GameServerManager
+            auto* serverManager = GameServerManager::GetInstance();
+            auto* server = serverManager->FindAvailableServer();
+            if (!server) {
+                // No servers available - players stay in queue
+                logger::warning("Match ready but no servers available (%zu players waiting)", matchPool.size());
+                
+                // Notify players they're in priority queue
+                for (const auto& player : matchPool) {
+                    // Send queue update: "Match found but waiting for server..."
+                    // Player position is held, they'll get next available server
+                }
+                
+                // Don't remove from queue - they keep priority
+                return; // Stop processing, wait for server to free up
+            }
+            
+            // Create the match
+            auto match = std::make_shared<Match>();
+            match->matchId = m_nextMatchId++;
+            match->matchToken = GenerateMatchToken();
+            match->state = MatchState::WAITING_FOR_CONFIRMATION;
+            match->mapName = SelectMapForMatch(matchPool);
+            match->serverAddress = server->address;
+            match->serverPort = server->port;
+            match->readyUpDeadline = std::chrono::steady_clock::now() + READY_UP_TIME;
+            
+            // Calculate average MMR
+            uint32_t totalMMR = 0;
+            for (const auto& player : matchPool) {
+                totalMMR += player->skillRating.mmr;
+            }
+            match->avgMMR = totalMMR / matchPool.size();
+            
+            // Distribute players into teams (snake draft for balance)
+            std::vector<size_t> indices(matchPool.size());
+            std::iota(indices.begin(), indices.end(), 0);
+            
+            // Team A gets: 0, 3, 4, 7, 8
+            // Team B gets: 1, 2, 5, 6, 9
+            match->teamA.push_back(matchPool[indices[0]]);
+            match->teamB.push_back(matchPool[indices[1]]);
+            match->teamB.push_back(matchPool[indices[2]]);
+            match->teamA.push_back(matchPool[indices[3]]);
+            match->teamA.push_back(matchPool[indices[4]]);
+            match->teamB.push_back(matchPool[indices[5]]);
+            match->teamB.push_back(matchPool[indices[6]]);
+            match->teamA.push_back(matchPool[indices[7]]);
+            match->teamA.push_back(matchPool[indices[8]]);
+            match->teamB.push_back(matchPool[indices[9]]);
+            
+            // Store the match
+            m_activeMatches[match->matchId] = match;
+            
+            // Map players to match
+            for (const auto& player : matchPool) {
+                m_playerToMatch[player->steamId] = match->matchId;
+                RemovePlayerFromQueue(player->steamId);
+            }
+            
+            // Mark server as occupied
+            serverManager->AssignMatchToServer(server->serverSteamId, match->matchId);
+            
+            // Notify all players
+            NotifyMatchFound(*match);
+            
+            logger::info("Match %llu created with %zu players (avg MMR: %u) on %s:%u",
+                        match->matchId, matchPool.size(), match->avgMMR,
+                        server->address.c_str(), server->port);
+            
+            // Continue looking for more matches
+            ProcessMatchmakingQueue();
+            return;
+        }
+    }
+}
+
+bool MatchmakingManager::AcceptMatch(uint64_t steamId) {
+    auto matchIt = m_playerToMatch.find(steamId);
+    if (matchIt == m_playerToMatch.end()) {
+        return false;
+    }
+    
+    auto match = m_activeMatches[matchIt->second];
+    if (!match || match->state != MatchState::WAITING_FOR_CONFIRMATION) {
+        return false;
+    }
+    
+    // Find the player and mark as accepted
+    for (auto& player : match->teamA) {
+        if (player->steamId == steamId) {
+            player->acceptedMatch = true;
+            logger::info("Player %llu accepted match %llu (%zu/%zu ready)",
+                        steamId, match->matchId, match->GetAcceptedCount(), PLAYERS_PER_TEAM * 2);
+            break;
+        }
+    }
+    for (auto& player : match->teamB) {
+        if (player->steamId == steamId) {
+            player->acceptedMatch = true;
+            logger::info("Player %llu accepted match %llu (%zu/%zu ready)",
+                        steamId, match->matchId, match->GetAcceptedCount(), PLAYERS_PER_TEAM * 2);
+            break;
+        }
+    }
+    
+    // Check if all players accepted
+    if (match->AllPlayersAccepted()) {
+        match->state = MatchState::IN_PROGRESS;
+        NotifyMatchReady(*match);
+        logger::info("Match %llu is ready! All players accepted.", match->matchId);
+    }
+    
+    return true;
+}
+
+bool MatchmakingManager::DeclineMatch(uint64_t steamId) {
+    auto matchIt = m_playerToMatch.find(steamId);
+    if (matchIt == m_playerToMatch.end()) {
+        return false;
+    }
+    
+    uint64_t matchId = matchIt->second;
+    logger::info("Player %llu declined match %llu", steamId, matchId);
+    
+    CancelMatch(matchId, "Player declined");
+    return true;
+}
+
+void MatchmakingManager::CancelMatch(uint64_t matchId, const std::string& reason) {
+    auto matchIt = m_activeMatches.find(matchId);
+    if (matchIt == m_activeMatches.end()) {
+        return;
+    }
+    
+    auto match = matchIt->second;
+    match->state = MatchState::ABANDONED;
+    
+    // Re-queue players who accepted (except the one who declined)
+    for (const auto& player : match->teamA) {
+        m_playerToMatch.erase(player->steamId);
+        if (player->acceptedMatch) {
+            AddPlayerToQueue(player->steamId, player->socket, player->skillRating, player->preferredMaps);
+        }
+    }
+    for (const auto& player : match->teamB) {
+        m_playerToMatch.erase(player->steamId);
+        if (player->acceptedMatch) {
+            AddPlayerToQueue(player->steamId, player->socket, player->skillRating, player->preferredMaps);
+        }
+    }
+    
+    // Free the server
+    auto* serverManager = GameServerManager::GetInstance();
+    auto servers = serverManager->GetAllServers();
+    for (const auto& server : servers) {
+        if (server.currentMatchId == matchId) {
+            serverManager->ReleaseServer(server.serverSteamId);
+            break;
+        }
+    }
+    
+    // Remove the match
+    m_activeMatches.erase(matchIt);
+    
+    logger::info("Match %llu cancelled: %s", matchId, reason.c_str());
+}
+
+std::string MatchmakingManager::SelectMapForMatch(const std::vector<std::shared_ptr<QueueEntry>>& players) const {
+    // In official MM, map is selected BEFORE match creation based on queue preferences
+    // This uses a weighted selection system where maps with more player preferences have higher chance
+    
+    std::map<std::string, int> mapWeights;
+    
+    // Count each player's map preferences
+    for (const auto& player : players) {
+        for (const auto& map : player->preferredMaps) {
+            mapWeights[map]++;
+        }
+    }
+    
+    // If no preferences, use full map pool with equal weights
+    if (mapWeights.empty()) {
+        for (const auto& map : m_mapPool) {
+            mapWeights[map] = 1;
+        }
+    }
+    
+    // Select map with highest weight (most player preferences)
+    // In case of tie, randomly select among tied maps
+    std::vector<std::string> topMaps;
+    int maxWeight = 0;
+    
+    for (const auto& [map, weight] : mapWeights) {
+        if (weight > maxWeight) {
+            maxWeight = weight;
+            topMaps.clear();
+            topMaps.push_back(map);
+        } else if (weight == maxWeight) {
+            topMaps.push_back(map);
+        }
+    }
+    
+    // Random selection among top weighted maps
+    if (!topMaps.empty()) {
+        std::random_device rd;
+        std::mt19937 gen(rd());
+        std::uniform_int_distribution<> dis(0, topMaps.size() - 1);
+        return topMaps[dis(gen)];
+    }
+    
+    return "de_dust2"; // Fallback
+}
+
+std::string MatchmakingManager::GenerateMatchToken() {
+    std::random_device rd;
+    std::mt19937 gen(rd());
+    std::uniform_int_distribution<> dis(0, 15);
+    
+    std::stringstream ss;
+    for (int i = 0; i < 16; ++i) {
+        ss << std::hex << dis(gen);
+    }
+    
+    return ss.str();
+}
+
+PlayerSkillRating MatchmakingManager::GetPlayerRating(uint64_t steamId, MYSQL* db) {
+    PlayerSkillRating rating;
+    
+    if (!db) {
+        rating.mmr = 1000; // Default MMR
+        rating.rank = 6;   // Gold Nova 1
+        return rating;
+    }
+    
+    char query[256];
+    snprintf(query, sizeof(query),
+            "SELECT mmr, rank_id, wins, level FROM player_rankings WHERE steamid64 = %llu",
+            steamId);
+    
+    if (mysql_query(db, query) == 0) {
+        MYSQL_RES* result = mysql_store_result(db);
+        if (result) {
+            MYSQL_ROW row = mysql_fetch_row(result);
+            if (row) {
+                rating.mmr = row[0] ? atoi(row[0]) : 1000;
+                rating.rank = row[1] ? atoi(row[1]) : 6;
+                rating.wins = row[2] ? atoi(row[2]) : 0;
+                rating.level = row[3] ? atoi(row[3]) : 1;
+            }
+            mysql_free_result(result);
+        }
+    }
+    
+    return rating;
+}
+
+void MatchmakingManager::UpdatePlayerRating(uint64_t steamId, const PlayerSkillRating& newRating, MYSQL* db) {
+    if (!db) return;
+    
+    char query[512];
+    snprintf(query, sizeof(query),
+            "INSERT INTO player_rankings (steamid64, mmr, rank_id, wins, level) "
+            "VALUES (%llu, %u, %u, %u, %u) "
+            "ON DUPLICATE KEY UPDATE mmr = VALUES(mmr), rank_id = VALUES(rank_id), "
+            "wins = VALUES(wins), level = VALUES(level)",
+            steamId, newRating.mmr, newRating.rank, newRating.wins, newRating.level);
+    
+    if (mysql_query(db, query) != 0) {
+        logger::error("Failed to update player rating: %s", mysql_error(db));
+    }
+}
+
+void MatchmakingManager::BuildMatchmakingHello(CMsgGCCStrike15_v2_MatchmakingGC2ClientHello& message, 
+                                              uint64_t steamId, MYSQL* db) {
+    message.set_account_id(steamId & 0xFFFFFFFF);
+    
+    // Get player rating
+    PlayerSkillRating rating = GetPlayerRating(steamId, db);
+    
+    // Set ranking info
+    auto* ranking = message.mutable_ranking();
+    ranking->set_account_id(steamId & 0xFFFFFFFF);
+    ranking->set_rank_id(rating.rank);
+    ranking->set_wins(rating.wins);
+    
+    // Set player level
+    message.set_player_level(rating.level);
+    message.set_player_cur_xp(0); // Could be tracked in database
+    
+    // Check if player is in an active match
+    auto matchIt = m_playerToMatch.find(steamId);
+    if (matchIt != m_playerToMatch.end()) {
+        auto match = m_activeMatches[matchIt->second];
+        if (match && match->state == MatchState::IN_PROGRESS) {
+            auto* ongoingMatch = message.mutable_ongoingmatch();
+            BuildMatchReservation(*ongoingMatch, *match, steamId);
+        }
+    }
+}
+
+void MatchmakingManager::BuildMatchReservation(CMsgGCCStrike15_v2_MatchmakingGC2ClientReserve& message,
+                                              const Match& match, uint64_t steamId) {
+    // Set match details
+    message.set_serverid(match.matchId);
+    message.set_direct_udp_ip(inet_addr(match.serverAddress.c_str()));
+    message.set_direct_udp_port(match.serverPort);
+    message.set_reservationid(match.matchId);
+    message.set_reservation_stage(match.state == MatchState::WAITING_FOR_CONFIRMATION ? 1 : 2);
+    
+    // Add map
+    message.add_map(match.mapName);
+    
+    // Set match token
+    auto* token = message.mutable_encrypted_steamid();
+    token->assign(match.matchToken);
+}
+
+void MatchmakingManager::BuildMatchUpdate(CMsgGCCStrike15_v2_MatchmakingGC2ClientUpdate& message,
+                                         const Match& match) {
+    // Add match status update
+    message.set_matchtype(1); // Competitive
+    
+    // Add waiting players count
+    message.set_waiting_players(match.GetAcceptedCount());
+    
+    // Add estimated wait time
+    auto now = std::chrono::steady_clock::now();
+    auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - match.createdTime);
+    message.set_est_wait_time(elapsed.count());
+}
+
+void MatchmakingManager::NotifyMatchFound(const Match& match) {
+    // Notify all players in the match
+    for (const auto& player : match.teamA) {
+        CMsgGCCStrike15_v2_MatchmakingGC2ClientReserve reserveMsg;
+        BuildMatchReservation(reserveMsg, match, player->steamId);
+        
+        // Send via networking (would need access to GCNetwork instance)
+        // This would be called from GCNetwork which has socket access
+    }
+    
+    for (const auto& player : match.teamB) {
+        CMsgGCCStrike15_v2_MatchmakingGC2ClientReserve reserveMsg;
+        BuildMatchReservation(reserveMsg, match, player->steamId);
+        
+        // Send via networking
+    }
+}
+
+void MatchmakingManager::NotifyMatchReady(const Match& match) {
+    // Notify all players that match is ready to start
+    logger::info("Notifying players that match %llu is ready", match.matchId);
+    
+    // In a real implementation, this would send connection details to players
+}
+
+void MatchmakingManager::Update() {
+    auto now = std::chrono::steady_clock::now();
+    static auto lastQueueCheck = now;
+    
+    // Process queue periodically
+    if (now - lastQueueCheck >= QUEUE_CHECK_INTERVAL) {
+        ProcessMatchmakingQueue();
+        CheckReadyUpTimeouts();
+        CleanupAbandonedMatches();
+        lastQueueCheck = now;
+        
+        // Log queue status
+        auto stats = GetQueueStatistics();
+        if (stats.totalPlayers > 0) {
+            logger::info("Matchmaking queue: %zu players, %zu active matches",
+                        stats.totalPlayers, stats.activeMatches);
+        }
+    }
+}
+
+void MatchmakingManager::CheckReadyUpTimeouts() {
+    auto now = std::chrono::steady_clock::now();
+    std::vector<uint64_t> matchesToCancel;
+    
+    for (const auto& [matchId, match] : m_activeMatches) {
+        if (match->state == MatchState::WAITING_FOR_CONFIRMATION &&
+            now > match->readyUpDeadline) {
+            matchesToCancel.push_back(matchId);
+        }
+    }
+    
+    for (uint64_t matchId : matchesToCancel) {
+        CancelMatch(matchId, "Ready-up timeout");
+    }
+}
+
+void MatchmakingManager::CleanupAbandonedMatches() {
+    // Remove completed/abandoned matches older than 5 minutes
+    auto now = std::chrono::steady_clock::now();
+    auto cutoff = now - std::chrono::minutes(5);
+    
+    auto it = m_activeMatches.begin();
+    while (it != m_activeMatches.end()) {
+        if ((it->second->state == MatchState::COMPLETED ||
+             it->second->state == MatchState::ABANDONED) &&
+            it->second->createdTime < cutoff) {
+            
+            // Clean up player mappings
+            for (const auto& player : it->second->teamA) {
+                m_playerToMatch.erase(player->steamId);
+            }
+            for (const auto& player : it->second->teamB) {
+                m_playerToMatch.erase(player->steamId);
+            }
+            
+            it = m_activeMatches.erase(it);
+        } else {
+            ++it;
+        }
+    }
+}
+
+MatchmakingManager::QueueStatistics MatchmakingManager::GetQueueStatistics() const {
+    QueueStatistics stats;
+    stats.totalPlayers = GetQueueSize();
+    stats.activeMatches = m_activeMatches.size();
+    
+    // Calculate average wait time
+    auto now = std::chrono::steady_clock::now();
+    uint64_t totalWaitSeconds = 0;
+    size_t playerCount = 0;
+    
+    for (const auto& [bracket, queue] : m_queuesBySkill) {
+        for (const auto& player : queue) {
+            auto waitTime = std::chrono::duration_cast<std::chrono::seconds>(now - player->queueTime);
+            totalWaitSeconds += waitTime.count();
+            playerCount++;
+            
+            // Count by rank
+            stats.playersByRank[player->skillRating.rank]++;
+        }
+    }
+    
+    if (playerCount > 0) {
+        stats.avgWaitTime = std::chrono::seconds(totalWaitSeconds / playerCount);
+    } else {
+        stats.avgWaitTime = std::chrono::seconds(0);
+    }
+    
+    return stats;
+}
+
+std::shared_ptr<Match> MatchmakingManager::GetMatchByPlayer(uint64_t steamId) {
+    auto it = m_playerToMatch.find(steamId);
+    if (it != m_playerToMatch.end()) {
+        auto matchIt = m_activeMatches.find(it->second);
+        if (matchIt != m_activeMatches.end()) {
+            return matchIt->second;
+        }
+    }
+    return nullptr;
+}
+
+std::shared_ptr<Match> MatchmakingManager::GetMatch(uint64_t matchId) {
+    auto it = m_activeMatches.find(matchId);
+    if (it != m_activeMatches.end()) {
+        return it->second;
+    }
+    return nullptr;
+}

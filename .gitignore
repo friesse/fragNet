@@ -1,0 +1,12 @@
+/*build*/
+/.idea/
+/.vs/
+/_deps/
+
+arch.c
+CMakeCache.txt
+*.vcxproj*
+*.sln
+/CMakeFiles/
+*/CMakeFiles/
+.vscode/settings.json

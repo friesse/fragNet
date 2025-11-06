@@ -60,6 +60,12 @@ target_link_libraries(gc-server PRIVATE
 )
 
 # Link cryptopp (from system, vcpkg, or FetchContent)
+message(STATUS "Searching for cryptopp library...")
+message(STATUS "CMAKE_FIND_PACKAGE_NAME: ${CMAKE_FIND_PACKAGE_NAME}")
+
+get_target_property(cryptopp_aliases cryptopp ALIASED_TARGET)
+message(STATUS "cryptopp_aliases: ${cryptopp_aliases}")
+
 if(TARGET cryptopp::cryptopp)
     message(STATUS "Linking cryptopp::cryptopp")
     target_link_libraries(gc-server PRIVATE cryptopp::cryptopp)
@@ -70,7 +76,14 @@ elseif(TARGET cryptopp)
     message(STATUS "Linking cryptopp")
     target_link_libraries(gc-server PRIVATE cryptopp)
 else()
-    message(FATAL_ERROR "cryptopp library not found! Available targets: ${CMAKE_FIND_PACKAGE_NAME}")
+    # Try to find cryptopp using find_package as a last resort
+    find_package(cryptopp QUIET)
+    if(TARGET cryptopp::cryptopp)
+        message(STATUS "Found cryptopp via find_package")
+        target_link_libraries(gc-server PRIVATE cryptopp::cryptopp)
+    else()
+        message(FATAL_ERROR "cryptopp library not found! Please ensure cryptopp is installed or use FetchContent.")
+    endif()
 endif()
 
 # Platform-specific libraries

@@ -1,0 +1,453 @@
+//====== Copyright 1996-2010, Valve Corporation, All rights reserved. =======
+//
+// Purpose: The file defines our Google Protocol Buffers which are used in over 
+// the wire messages between servers as well as between the CS:GO and CS:GO gameservers
+// and clients.
+//
+//=============================================================================
+
+// We care more about speed than code size
+option optimize_for = SPEED;
+
+// We don't use the service generation functionality
+option cc_generic_services = false;
+
+
+// 
+// STYLE NOTES:
+//
+// Use CamelCase CMsgMyMessageName style names for messages.
+// 
+// Use lowercase _ delimited names like my_steam_id for field names, this is non-standard for Steam,
+// but plays nice with the Google formatted code generation.  
+// 
+// Try not to use required fields ever. Only do so if you are really really sure you'll never want them removed. 
+// Optional should be preffered as it will make versioning easier and cleaner in the future if someone refactors
+// your message and wants to remove or rename fields.
+//
+// Use fixed64 for JobId_t, GID_t, or SteamID.  This is appropriate for any field that is normally
+// going to be larger than 2^56.  Otherwise use int64 for 64 bit values that are frequently smaller
+// than 2^56 as it will safe space on the wire in those cases.
+//
+// Similar to fixed64, use fixed32 for RTime32 or other 32 bit values that are frequently larger than
+// 2^28.  It will safe space in those cases, otherwise use int32 which will safe space for smaller values.
+// An exception to this rule for RTime32 is if the value will frequently be zero rather than set to an actual 
+// time.
+//
+
+import "steammessages.proto";
+import "engine_gcmessages.proto";
+import "base_gcmessages.proto";
+import "cstrike15_gcmessages.proto";
+import "gcsdk_gcmessages.proto";
+
+
+
+enum ECCGCMsg
+{
+	// base messages
+	k_EMsgGC_CC_Base							= 1000;
+	k_EMsgGC_CC_GCWelcome						= 1001; // client -> GC
+	k_EMsgGC_CC_GCConfirmAuth					= 1002; // GC -> client
+
+	k_EMsgGC_CC_CL2GC_BuildMatchmakingHelloRequest = 1003; // client -> GC
+	k_EMsgGC_CC_GC2CL_BuildMatchmakingHello		= 1004; // GC -> client
+
+	k_EMsgGC_CC_CL2GC_SOCacheSubscribedRequest	= 1005; // client -> GC
+	k_EMsgGC_CC_GC2CL_SOCacheSubscribed			= 1006; // GC -> client
+
+	k_EMsgGC_CC_GCHeartbeat						= 1040; // GC <-> client
+
+	// inventory data
+	k_EMsgGC_CC_GC2CL_SOSingleObject			= 1050; // GC -> client 	// CMsgSOSingleObject
+	k_EMsgGC_CC_GC2CL_SOMultipleObjects			= 1051; // GC -> client		// CMsgSOMultipleObjects
+
+	// inventory actions
+	k_EMsgGC_CC_CL2GC_UnlockCrate				= 1060; // client -> GC
+	k_EMsgGC_CC_GC2CL_UnlockCrateResponse		= 1061; // GC -> client		// this is built using SOSingleObject... erm okay why?
+	k_EMsgGC_CC_CL2GC_ItemAcknowledged			= 1062; // client -> GC
+	k_EMsgGC_CC_DeleteItem						= 1063; // client <-> GC 	// Client sends the Item ID, GC sends a SOSingleObject
+	k_EMsgGC_CC_CL2GC_AdjustItemEquippedState	= 1064; // client -> GC
+	k_EMsgGC_CC_CL2GC_UseItem					= 1065; // client -> GC
+	k_EMsgGC_CC_CL2GC_ApplySticker				= 1066; // client -> GC
+	k_EMsgGC_CC_CL2GC_NameItem					= 1067; // client -> GC
+	k_EMsgGC_CC_CL2GC_NameBaseItem				= 1068; // client -> GC
+	k_EMsgGC_CC_CL2GC_RemoveItemName			= 1069; // client -> GC
+	k_EMsgGC_CC_CL2GC_Craft						= 1070; // client -> GC
+	k_EMsgGC_CC_GC2CL_CraftResponse				= 1071; // GC -> client
+
+
+
+	// other
+	k_EMsgGC_CC_CL2GC_ViewPlayersProfileRequest	= 1100; // client -> GC
+	k_EMsgGC_CC_GC2CL_ViewPlayersProfileResponse = 1101; // GC -> client
+
+	k_EMsgGC_CC_CL2GC_ClientCommendPlayerQuery = 1102; // client -> GC
+	k_EMsgGC_CC_GC2CL_ClientCommendPlayerQueryResponse = 1103; // GC -> client
+	k_EMsgGC_CC_CL2GC_ClientCommendPlayer		= 1104; // client -> GC
+	// i dont think gc sends a response for commendations
+
+	k_EMsgGC_CC_CL2GC_ClientReportPlayer		= 1120; // client -> GC
+	k_EMsgGC_CC_GC2CL_ClientReportResponse		= 1121; // GC -> client (is this neccessary?)
+
+	k_EMsgGC_CC_CL2GC_StorePurchaseInit			= 1200; // client -> GC
+	k_EMsgGC_CC_GC2CL_StorePurchaseInitResponse	= 1201; // GC -> client
+}
+
+/*
+*  BASE MESSAGES
+*/
+
+//
+// k_EMsgGC_CC_GCWelcome
+//
+
+// client -> GC
+message CMsgGC_CC_GCWelcome
+{
+	required fixed64 steam_id = 1;
+	required fixed32 auth_ticket_size = 2;
+	required bytes auth_ticket = 3;
+}
+
+//
+// k_EMsgGC_CC_GCConfirmAuth
+//
+
+// GC -> Client
+message CMsgGC_CC_GCConfirmAuth
+{
+	required uint32 auth_result = 1;
+}
+
+//
+// k_EMsgGC_CC_GC2CL_BuildMatchmakingHello
+//
+
+// client -> GC
+message CMsgGC_CC_CL2GC_BuildMatchmakingHelloRequest
+{
+	required fixed64 steam_id = 1;
+}
+
+// GC -> Client
+message CMsgGC_CC_GC2CL_BuildMatchmakingHello 
+{
+	optional uint32 account_id = 1;						// Client account id
+	optional CMsgGCCStrike15_v2_MatchmakingGC2ClientReserve ongoingmatch = 2;		// Match that the client should be participating in
+	optional GlobalStatistics global_stats = 3;			// Global statistics about the game
+	optional uint32 penalty_seconds = 4;				// How many penalty seconds remaining for the player
+	optional uint32 penalty_reason = 5;					// What is the reason for player being penalized
+	optional int32 vac_banned = 6;						// When non-zero means the account has been VAC banned
+	optional PlayerRankingInfo ranking = 7;				// Account ranking information
+	optional PlayerCommendationInfo commendation = 8;	// Commendation information
+	optional PlayerMedalsInfo medals = 9;				// Medals that GC has cached for the client
+	optional TournamentEvent my_current_event = 10;		// Event that the user is currently participating in
+	repeated TournamentTeam my_current_event_teams = 11; // Teams that are currently participating in the event
+	optional TournamentTeam my_current_team = 12;		// Team that the user is playing on
+	repeated TournamentEvent my_current_event_stages = 13; // Stages remaining in the event
+	optional uint32 survey_vote = 14;					// What is the current player vote on the active survey
+	optional AccountActivity activity = 15;				// What GC has cached for the client
+	// optional int32 seconds_until_next_mission_deprecated = 16;		// Number of seconds until we've earned our next mission
+	optional int32 player_level = 17;					// Player's level based on xp earned in matches
+	optional int32 player_cur_xp = 18;					// Player's xp earned towards next level 
+	optional int32 player_xp_bonus_flags = 19;			// Flags marking which perodic bonuses the player has available
+}
+
+//
+// k_EMsgGC_CC_GC2CL_SOCacheSubscribed
+//
+
+// client -> GC
+message CMsgGC_CC_CL2GC_SOCacheSubscribedRequest
+{
+	required fixed64 steam_id = 1;
+}
+
+// GC -> Client
+message CMsgGC_CC_GC2CL_SOCacheSubscribed
+{
+	message SubscribedType 
+	{
+		optional int32 type_id = 1;
+		repeated bytes object_data = 2;
+	}
+
+	repeated .CMsgSOCacheSubscribed.SubscribedType objects = 2;
+	optional fixed64 version = 3;
+	optional .CMsgSOIDOwner owner_soid = 4;
+}
+
+//
+// k_EMsgGC_CC_GCHeartbeat
+//
+message CMsgGC_CC_GCHeartbeat
+{
+	// heartbeat is empty, we only care about the message
+}
+
+
+
+
+
+/*
+*  INVENTORY DATA
+*/
+
+//
+// k_EMsgGC_CC_GCInventoryData
+//
+
+// Client -> Client
+message CMsgGC_CC_CL2GC_InventoryData
+{
+	required fixed64 steam_id = 1;
+	required fixed32 auth_ticket_size = 2;
+	required bytes auth_ticket = 3;
+}
+
+// GC -> Client
+message CMsgGC_CC_GC2CL_InventoryData
+{
+	repeated .CSOEconItem inventory_data = 1;
+	repeated .CSOEconItemDefaultEquipped equips = 2;
+}
+
+// helper for CMsgGC_CC_GC2CL_InventoryData
+message CSOEconItemDefaultEquipped 
+{
+	required uint32 def_index = 1;
+	required uint32 class_id = 2;
+	required uint32 slot_id = 3;
+}
+
+
+
+
+
+
+/*
+*  INVENTORY ACTIONS
+*/
+
+// Client -> GC
+message CMsgGC_CC_CL2GC_UnlockCrate
+{
+	optional uint64 key_id = 1;							// ID of key that was used (this will probably be unused, but have it here because)
+	optional uint64 crate_id = 2;						// ID of crate opened
+}
+
+// Client <-> GC
+// Client sends the Item ID, GC sends a SOSingleObject via k_EMsgGC_CC_DeleteItem
+message CMsgGC_CC_DeleteItem
+{
+	required uint64 item_id = 1;						// item_id to delete
+}
+
+// Client -> GC
+message CMsgGC_CC_CL2GC_ItemAcknowledged
+{
+	repeated uint64 item_id = 1;						// The ID(s) of the item(s) being acknowledged
+}
+
+// Client -> GC
+message CMsgGC_CC_CL2GC_AdjustItemEquippedState
+{
+	optional uint64		item_id = 1;
+	optional uint32		new_class = 2;
+	optional uint32		new_slot = 3;					// will be -1 if not equipped on this class any longer
+	optional bool		swap = 4;
+}
+
+// Client -> GC
+message CMsgGC_CC_CL2GC_UseItem
+{
+	optional uint64 item_id = 1;
+	optional fixed64 target_steam_id = 2;				// 64-bit field left over from original message
+	
+	repeated uint32 gift__potential_targets = 3;
+	optional uint32 duel__class_lock = 4;
+	optional fixed64 initiator_steam_id = 5;
+}
+
+// Client -> GC
+message CMsgGC_CC_CL2GC_ApplySticker
+{
+	optional uint64 sticker_item_id = 1;				// which sticker are we attaching?
+	optional uint64 item_item_id = 2;					// what item are we sticking it on to?
+	optional uint32 sticker_slot = 3;					// which sticker slot are we modifying? When attaching a sticker replace slot, when 0-sticker just applies wear.
+	optional uint32 baseitem_defidx = 4;				// If not sticking it on existing item support sticking it on base item
+	optional float  sticker_wear = 5;					// when applying sticker wear this field specifies current wear as seen by client (to prevent double-scraping in case message reaches GC multiple times)
+}
+
+// Client -> GC
+message CMsgGC_CC_CL2GC_NameItem
+{
+    optional uint64 nametag_id = 1;
+    optional uint64 item_id = 2;
+    optional string name = 3;
+}
+
+// Client -> GC
+message CMsgGC_CC_CL2GC_NameBaseItem
+{
+    optional uint64 nametag_id = 1;
+    optional uint32 defindex = 2;
+    optional string name = 3;
+}
+
+// Client -> GC
+message CMsgGC_CC_CL2GC_RemoveItemName
+{
+    optional uint64 item_id = 1;
+}
+
+
+
+// TRADE UPS
+message CMsgGC_CC_CL2GC_Craft
+{
+    optional int32 recipe_defindex = 1;     			// The recipe/collection definition index
+    repeated uint64 item_ids = 2;           			// The IDs of items being used in the craft
+}
+
+message CMsgGC_CC_GC2CL_CraftResponse
+{
+    optional int32 response_index = 1;     			 	// The recipe index from the request
+    optional uint32 response_code = 2;      			// result (success/failure)
+    optional CMsgSOSingleObject item_object = 3; // the resulting item
+}
+
+
+
+
+// GC -> Client
+// replaced by just using CMsgSOSingleObject
+/*message CMsgGC_CC_GC2CL_SOSingleObject
+{
+	optional int32 type_id = 2;
+	optional bytes object_data = 3;
+	optional fixed64 version = 4;
+	optional .CMsgSOIDOwner owner_soid = 5;
+}*/
+
+// GC -> Client
+// replaced by just using CMsgSOMultipleObjects
+/*message CMsgGC_CC_GC2CL_SOMultipleObjects
+{
+	message SingleObject {
+		option (msgpool_soft_limit) = 256;
+		option (msgpool_hard_limit) = 1024;
+		optional int32 type_id = 1;
+		optional bytes object_data = 2;
+	}
+
+	repeated .CMsgSOMultipleObjects.SingleObject objects_modified = 2;
+	optional fixed64 version = 3;
+	repeated .CMsgSOMultipleObjects.SingleObject objects_added = 4;
+	repeated .CMsgSOMultipleObjects.SingleObject objects_removed = 5;
+	optional .CMsgSOIDOwner owner_soid = 6;
+}*/
+
+
+/*
+*  OTHER
+*/
+
+//
+// k_EMsgGC_CC_CL2GC_ViewPlayersProfileRequest
+//
+// Client requests player profile details
+//
+message CMsgGC_CC_CL2GC_ViewPlayersProfileRequest
+{
+	optional uint32 account_id = 1;						// Account id requested
+	optional uint32 request_level = 2;					// How much data is being requested (EMsgGCAccountPrivacyRequestLevel_t)
+}
+
+//
+// k_EMsgGC_CC_GC2CL_ViewPlayersProfileResponse
+//
+// GC responds with friends profile details
+//
+message CMsgGC_CC_GC2CL_ViewPlayersProfileResponse
+{
+	optional uint32 request_id = 1;						// Request id
+	repeated CMsgGCCStrike15_v2_MatchmakingGC2ClientHello account_profiles = 2; // Available profiles
+}
+
+
+
+//
+// k_EMsgGC_CC_CL2GC_ClientCommendPlayer
+// k_EMsgGC_CC_CL2GC_ClientCommendPlayerQuery
+// k_EMsgGC_CC_GC2CL_ClientCommendPlayerQueryResponse
+//
+// Client submitted a player commendation, queried commendation or query response
+//
+message CMsgGC_CC_ClientCommendPlayer
+{
+	optional uint32 account_id = 1;  					// target account_id
+	optional PlayerCommendationInfo commendation = 9;
+	optional uint32 tokens = 10;						// commendations remaining
+
+	/*PlayerCommendationInfo:
+	optional uint32 cmd_friendly = 1;					// Friendly
+	optional uint32 cmd_teaching = 2;					// Teaching
+	optional uint32 cmd_leader = 4;						// Leader*/
+}
+
+// client -> gc
+message CMsgGC_CC_CL2GC_ClientReportPlayer
+{
+	optional uint32 account_id = 1;
+	optional uint32 rpt_aimbot = 2;
+	optional uint32 rpt_wallhack = 3;
+	optional uint32 rpt_speedhack = 4;
+	optional uint32 rpt_teamharm = 5;
+	optional uint32 rpt_textabuse = 6;
+	optional uint32 rpt_voiceabuse = 7;
+	optional uint64 match_id = 8; // might replace with servername?
+	//optional bool report_from_demo = 9; // idk, will this ever be supported      // apparently not in CMsgGCCStrike15 msg?
+}
+
+// gc -> client
+message CMsgGC_CC_GC2CL_ClientReportResponse
+{
+	optional uint64 confirmation_id = 1;
+	optional uint32 account_id = 2;
+	optional uint32 server_ip = 3;
+	optional uint32 response_type = 4;
+	optional uint32 response_result = 5;
+	optional uint32 tokens = 6;
+}
+
+
+/*
+*  PURCHASES
+*/
+
+// k_EMsgGC_CC_CL2GC_StorePurchaseInit
+message CMsgGC_CC_CL2GC_StorePurchaseInit
+{
+	optional	string	country = 1;				// Country the purchase is being made from (obtained from Steam)
+	optional	int32	language = 2;				// Client's language
+	optional	int32	currency = 3;				// Currency the purchase is in (obtained from Steam)
+
+	repeated	CGCStorePurchaseInit_LineItem	line_items = 4;
+
+	/*GCSStorePurchaseInit_LineItem:
+	optional	uint32	item_def_id = 1;			// DefIndex of the item to purchase
+	optional	uint32	quantity = 2;				// quantity to purchase
+	optional	uint32	cost_in_local_currency = 3;	// cost in cents of the local currency the user thinks he should pay (if you change this update item_price_t!)
+	optional	uint32	purchase_type = 4;			// is this a regular purchase? a rental? maps to ECartItemType*/
+}
+
+// k_EMsgGC_CC_GC2CL_StorePurchaseInitResponse
+message CMsgGC_CC_GC2CL_StorePurchaseInitResponse
+{
+	optional	int32	result = 1;					// Result of the operation
+	optional	uint64	txn_id = 2;					// Transaction ID of the new transaction
+	optional	string	url = 3;					// URL that the client will open to follow up
+	repeated	uint64	item_ids = 4;				// ItemIDs for immediately finalized txn
+}
