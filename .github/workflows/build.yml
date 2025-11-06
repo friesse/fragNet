@@ -64,19 +64,50 @@ jobs:
       name: Build (Linux)
       run: |
         cd ${{ github.workspace }}/build
-        cmake --build . --config ${{ matrix.build_type }} -j$(nproc)
+        # Build with verbose output
+        cmake --build . --config ${{ matrix.build_type }} -j$(nproc) --verbose
+        
+        # Check if build was successful and show the build directory structure
+        echo "Build completed. Directory structure:"
+        find . -type f -executable -print -o -name "*.so*" -print | sort
         
     - if: matrix.os == 'ubuntu-latest'
-      name: Package Linux
+      name: Find and Package Binary
       run: |
+        # Create release directory
         mkdir -p ${{ github.workspace }}/release/gc_server
-        cp ${{ github.workspace }}/build/gc_server/gc_server ${{ github.workspace }}/release/gc_server/
-        cp ${{ github.workspace }}/README.md ${{ github.workspace }}/release/ || true
-        cp ${{ github.workspace }}/QUICK_START.md ${{ github.workspace }}/release/ || true
-        cp -r ${{ github.workspace }}/items ${{ github.workspace }}/release/ || true
-        cp ${{ github.workspace }}/start_gc_server.sh ${{ github.workspace }}/release/ || true
-        chmod +x ${{ github.workspace }}/release/start_gc_server.sh || true
-        chmod +x ${{ github.workspace }}/release/gc_server/gc_server
+        
+        # Find the built binary
+        if [ -f "${{ github.workspace }}/build/gc_server/gc_server" ]; then
+            echo "Found binary at: ${{ github.workspace }}/build/gc_server/gc_server"
+            cp "${{ github.workspace }}/build/gc_server/gc_server" "${{ github.workspace }}/release/gc_server/"
+        elif [ -f "${{ github.workspace }}/build/Release/gc_server/gc_server" ]; then
+            echo "Found binary at: ${{ github.workspace }}/build/Release/gc_server/gc_server"
+            cp "${{ github.workspace }}/build/Release/gc_server/gc_server" "${{ github.workspace }}/release/gc_server/"
+        else
+            echo "Error: Could not find built binary. Build may have failed."
+            echo "Build directory contents:"
+            find "${{ github.workspace }}/build" -type f -executable -print -o -name "gc_server" -print
+            exit 1
+        fi
+        
+        # Copy additional files
+        cp -v "${{ github.workspace }}/README.md" "${{ github.workspace }}/release/" || echo "README.md not found, skipping"
+        cp -v "${{ github.workspace }}/QUICK_START.md" "${{ github.workspace }}/release/" || echo "QUICK_START.md not found, skipping"
+        
+        # Copy items directory if it exists
+        if [ -d "${{ github.workspace }}/items" ]; then
+            cp -r "${{ github.workspace }}/items" "${{ github.workspace }}/release/"
+        fi
+        
+        # Make start script executable if it exists
+        if [ -f "${{ github.workspace }}/start_gc_server.sh" ]; then
+            cp -v "${{ github.workspace }}/start_gc_server.sh" "${{ github.workspace }}/release/"
+            chmod +x "${{ github.workspace }}/release/start_gc_server.sh"
+        fi
+        
+        # Make the binary executable
+        chmod +x "${{ github.workspace }}/release/gc_server/gc_server"
 
     # Windows Build
     - if: matrix.os == 'windows-latest'
