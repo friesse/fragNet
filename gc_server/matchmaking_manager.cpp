@@ -730,3 +730,132 @@ void MatchmakingManager::CheckReadyUpTimeouts() {
         CancelMatchInternal(matchId, "Ready-up timeout");
     }
 }
+
+bool MatchmakingManager::IsPlayerInQueue(uint64_t steamId) const {
+    std::shared_lock<std::shared_mutex> lock(m_queueMutex);
+    
+    for (const auto& [bracket, queue] : m_queues) {
+        for (const auto& entry : queue) {
+            if (entry && entry->steamId == steamId) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+bool MatchmakingManager::AcceptMatch(uint64_t steamId) {
+    std::unique_lock<std::shared_mutex> lock(m_matchMutex);
+    
+    // Find match containing this player
+    for (auto& [matchId, match] : m_activeMatches) {
+        if (match->state.load() != MatchState::WAITING_FOR_CONFIRMATION) {
+            continue;
+        }
+        
+        // Check if player is in this match
+        bool found = false;
+        for (auto& player : match->teamA) {
+            if (player && player->steamId == steamId) {
+                player->hasAccepted = true;
+                found = true;
+                break;
+            }
+        }
+        if (!found) {
+            for (auto& player : match->teamB) {
+                if (player && player->steamId == steamId) {
+                    player->hasAccepted = true;
+                    found = true;
+                    break;
+                }
+            }
+        }
+        
+        if (found) {
+            // Check if all players have accepted
+            bool allAccepted = true;
+            for (const auto& p : match->teamA) {
+                if (p && !p->hasAccepted) {
+                    allAccepted = false;
+                    break;
+                }
+            }
+            if (allAccepted) {
+                for (const auto& p : match->teamB) {
+                    if (p && !p->hasAccepted) {
+                        allAccepted = false;
+                        break;
+                    }
+                }
+            }
+            
+            if (allAccepted) {
+                match->state.store(MatchState::IN_PROGRESS);
+                NotifyMatchReady(*match);
+            }
+            return true;
+        }
+    }
+    return false;
+}
+
+bool MatchmakingManager::DeclineMatch(uint64_t steamId) {
+    std::unique_lock<std::shared_mutex> lock(m_matchMutex);
+    
+    // Find and cancel match containing this player
+    for (auto& [matchId, match] : m_activeMatches) {
+        if (match->state.load() != MatchState::WAITING_FOR_CONFIRMATION) {
+            continue;
+        }
+        
+        // Check if player is in this match
+        for (const auto& player : match->teamA) {
+            if (player && player->steamId == steamId) {
+                CancelMatchInternal(matchId, "Player declined");
+                return true;
+            }
+        }
+        for (const auto& player : match->teamB) {
+            if (player && player->steamId == steamId) {
+                CancelMatchInternal(matchId, "Player declined");
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+uint32_t MatchmakingManager::GetSkillBracket(uint32_t mmr) const {
+    // Simple bracket system: divide MMR by bracket size
+    return mmr / m_config.baseMMRSpread;
+}
+
+bool MatchmakingManager::ArePlayersCompatible(const QueueEntry& p1, const QueueEntry& p2) const {
+    // Check MMR difference
+    uint32_t mmrDiff = std::abs(static_cast<int32_t>(p1.skillRating.mmr) - 
+                                 static_cast<int32_t>(p2.skillRating.mmr));
+    
+    if (mmrDiff > m_config.baseMMRSpread * 2) {
+        return false;
+    }
+    
+    // Check map preferences if any
+    if (!p1.preferredMaps.empty() && !p2.preferredMaps.empty()) {
+        bool hasCommonMap = false;
+        for (const auto& map1 : p1.preferredMaps) {
+            for (const auto& map2 : p2.preferredMaps) {
+                if (map1 == map2) {
+                    hasCommonMap = true;
+                    break;
+                }
+            }
+            if (hasCommonMap) break;
+        }
+        if (!hasCommonMap) {
+            return false;
+        }
+    }
+    
+    return true;
+}
