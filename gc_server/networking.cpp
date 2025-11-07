@@ -31,11 +31,24 @@ GCNetwork::GCNetwork()
     if (!GCNetwork_Inventory::Init()) {
         logger::error("Failed to initialize inventory system in GCNetwork constructor");
     }
+    
+    // DISABLED: Initialize matchmaking manager
+    // m_matchmakingManager = new MatchmakingManager();
+    // MatchmakingManager::SetGlobalInstance(m_matchmakingManager);
+    // logger::info("MatchmakingManager initialized successfully");
+    m_matchmakingManager = nullptr;
+    logger::info("MatchmakingManager disabled - not initialized");
 }
 
 GCNetwork::~GCNetwork()
 {
     GCNetwork_Inventory::Cleanup();
+    
+    // Cleanup matchmaking manager
+    if (m_matchmakingManager) {
+        delete m_matchmakingManager;
+        m_matchmakingManager = nullptr;
+    }
 
     CloseDatabases();
     SteamGameServerNetworking()->DestroyListenSocket(listen_socket, true);
@@ -329,11 +342,11 @@ void GCNetwork::Update()
         itemCheckCounter = 0;
     }
     
-    // update matchmaking every frame
-    if (++matchmakingCounter >= 50) { // Update every ~1 second at 20 ticks/sec
-        MatchmakingManager::GetInstance()->Update();
-        matchmakingCounter = 0;
-    }
+    // DISABLED: update matchmaking every frame
+    // if (++matchmakingCounter >= 50) { // Update every ~1 second at 20 ticks/sec
+    //     MatchmakingManager::GetInstance()->Update();
+    //     matchmakingCounter = 0;
+    // }
 
     SteamGameServer_RunCallbacks();
 
@@ -639,7 +652,8 @@ void GCNetwork::Update()
                 break;
 
             // MATCHMAKING MESSAGES
-            case k_EMsgGCCStrike15_v2_MatchmakingClient2GCHello:
+            // DISABLED: Matchmaking
+            /*case k_EMsgGCCStrike15_v2_MatchmakingClient2GCHello:
                 logger::info("Received MatchmakingClient2GCHello");
                 {
                     uint64_t steamId = GetSessionSteamId(p2psocket);
@@ -649,9 +663,9 @@ void GCNetwork::Update()
                         logger::error("MatchmakingClient2GCHello: No valid session for this socket");
                     }
                 }
-                break;
+                break;*/
 
-            case k_EMsgGCCStrike15_v2_MatchmakingStart:
+            /*case k_EMsgGCCStrike15_v2_MatchmakingStart:
                 logger::info("Received MatchmakingStart");
                 {
                     uint64_t steamId = GetSessionSteamId(p2psocket);
@@ -661,9 +675,9 @@ void GCNetwork::Update()
                         logger::error("MatchmakingStart: No valid session for this socket");
                     }
                 }
-                break;
+                break;*/
 
-            case k_EMsgGCCStrike15_v2_MatchmakingStop:
+            /*case k_EMsgGCCStrike15_v2_MatchmakingStop:
                 logger::info("Received MatchmakingStop");
                 {
                     uint64_t steamId = GetSessionSteamId(p2psocket);
@@ -673,13 +687,13 @@ void GCNetwork::Update()
                         logger::error("MatchmakingStop: No valid session for this socket");
                     }
                 }
-                break;
+                break;*/
 
             // Matchmaking accept/decline temporarily disabled - enum values not in current protobuf schema
             // case k_EMsgGCCStrike15_v2_MatchmakingClient2GCAccept:
             // case k_EMsgGCCStrike15_v2_MatchmakingClient2GCDecline:
 
-            case k_EMsgGCCStrike15_v2_MatchmakingServerMatchEnd:
+            /*case k_EMsgGCCStrike15_v2_MatchmakingServerMatchEnd:
                 logger::info("Received MatchmakingServerMatchEnd");
                 {
                     uint64_t steamId = GetSessionSteamId(p2psocket);
@@ -689,9 +703,9 @@ void GCNetwork::Update()
                         logger::error("MatchEnd: No valid session for this socket");
                     }
                 }
-                break;
+                break;*/
 
-            case k_EMsgGCCStrike15_v2_MatchmakingServerRoundStats:
+            /*case k_EMsgGCCStrike15_v2_MatchmakingServerRoundStats:
                 logger::info("Received MatchmakingServerRoundStats");
                 {
                     uint64_t steamId = GetSessionSteamId(p2psocket);
@@ -701,7 +715,7 @@ void GCNetwork::Update()
                         logger::error("RoundStats: No valid session for this socket");
                     }
                 }
-                break;
+                break;*/
 
             default:
                 logger::error("Unknown message type: %u", real_type);

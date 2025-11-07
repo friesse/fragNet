@@ -50,6 +50,9 @@ private:
 	MYSQL* m_mysql1; // classiccounter
 	MYSQL* m_mysql2; // inventory
 	MYSQL* m_mysql3; // ranked
+	
+	// matchmaking
+	class MatchmakingManager* m_matchmakingManager;
 
 	// whitelist - DISABLED (all Steam-authenticated users allowed)
 	// bool m_maintenanceMode = false;
