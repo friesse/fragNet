@@ -4,6 +4,7 @@
 #include "keyvalue_english.hpp"
 #include "logger.hpp"
 #include "gcsystemmsgs.pb.h"
+#include "econ_gcmessages.pb.h"
 #include <ctime>
 #include <cstdint>
 #include <cstring>
@@ -1388,14 +1389,15 @@ bool GCNetwork_Inventory::HandleUnboxCrate(
     }
     
     // 2. Send the UnlockCrateResponse for the animation completion
-    bool unlockSuccess = SendSOSingleObject(p2psocket, steamId, SOTypeItem, newItem, k_EMsgGC_CC_GC2CL_UnlockCrateResponse);
+    // CRITICAL: Must use k_EMsgGCUnlockCrateResponse (1008), NOT k_EMsgGC_CC_GC2CL_UnlockCrateResponse (1061)!
+    bool unlockSuccess = SendSOSingleObject(p2psocket, steamId, SOTypeItem, newItem, k_EMsgGCUnlockCrateResponse);
     if (!unlockSuccess)
     {
         logger::error("HandleUnboxCrate: Failed to send unlock response to client");
     }
     else
     {
-        logger::info("HandleUnboxCrate: Sent UnlockCrateResponse for item %llu", newItemId);
+        logger::info("HandleUnboxCrate: Sent UnlockCrateResponse (1008) for item %llu", newItemId);
     }
     
     // Now actually delete the crate from database (but don't send destroy message)
