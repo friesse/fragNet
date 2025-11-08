@@ -1,7 +1,17 @@
 #include "networking_inventory.hpp"
+#include "networking_users.hpp"
 #include "gc_const_csgo.hpp"
 #include "keyvalue_english.hpp"
 #include "logger.hpp"
+#include "gcsystemmsgs.pb.h"
+#include <ctime>
+#include <cstdint>
+#include <cstring>
+#include <string>
+#include <sstream>
+#include <regex>
+#include <cstdlib>
+#include <cctype>
 
 ItemSchema *g_itemSchema = nullptr;
 
@@ -1362,9 +1372,31 @@ bool GCNetwork_Inventory::HandleUnboxCrate(
     // setting id to newest
     newItem.set_id(newItemId);
 
-    // Send messages to match expected client sequence for case opening animation:
+    // Send messages in the exact sequence that works in the test client:
+    // The client expects specific ESO (Extensible Shared Object) messages
     
-    // 1. First simulate a key deletion (even though we're keyless, the animation expects this)
+    // Get the crate item before deleting it from DB
+    CSOEconItem *crateForDelete = FetchItemFromDatabase(crateItemId, steamId, inventory_db);
+    if (!crateForDelete)
+    {
+        logger::error("HandleUnboxCrate: Failed to fetch crate for delete message");
+        delete crateItem;
+        return false;
+    }
+    
+    // 1. Send crate destruction (k_ESOMsg_Destroy = 23)
+    uint32_t destroyMsg = k_ESOMsg_Destroy | ProtobufMask;
+    bool crateDestroySuccess = SendSOSingleObject(p2psocket, steamId, SOTypeItem, *crateForDelete, destroyMsg);
+    if (!crateDestroySuccess)
+    {
+        logger::error("HandleUnboxCrate: Failed to send crate destroy message");
+    }
+    else
+    {
+        logger::info("HandleUnboxCrate: Sent crate destroy (ESOMsg_Destroy) for crate %llu", crateItemId);
+    }
+    
+    // 2. Send fake key destruction for keyless system (k_ESOMsg_Destroy = 23)
     // Create a fake key item to satisfy the client's animation logic
     CSOEconItem fakeKey;
     fakeKey.set_id(99999999 + (crateItemId % 1000000)); // Generate unique fake key ID based on crate
@@ -1374,35 +1406,29 @@ bool GCNetwork_Inventory::HandleUnboxCrate(
     fakeKey.set_quality(4);
     fakeKey.set_rarity(3);
     
-    // Send fake key deletion to trigger animation
-    bool keyDeleteSuccess = SendSOSingleObject(p2psocket, steamId, SOTypeItem, fakeKey, k_EMsgGC_CC_DeleteItem);
-    if (!keyDeleteSuccess)
+    bool keyDestroySuccess = SendSOSingleObject(p2psocket, steamId, SOTypeItem, fakeKey, destroyMsg);
+    if (!keyDestroySuccess)
     {
-        logger::warning("HandleUnboxCrate: Failed to send fake key deletion");
+        logger::warning("HandleUnboxCrate: Failed to send fake key destroy");
     }
     else
     {
-        logger::info("HandleUnboxCrate: Sent fake key deletion to trigger animation");
+        logger::info("HandleUnboxCrate: Sent fake key destroy (ESOMsg_Destroy)");
     }
     
-    // 2. Delete the crate (this sends the delete notification)
-    if (!DeleteItem(p2psocket, steamId, crateItemId, inventory_db))
-    {
-        logger::warning("HandleUnboxCrate: Failed to delete crate %llu after opening", crateItemId);
-    }
-    
-    // 3. Send the item creation notification (k_EMsgGC_CC_GC2CL_SOSingleObject)
-    bool createSuccess = SendSOSingleObject(p2psocket, steamId, SOTypeItem, newItem, k_EMsgGC_CC_GC2CL_SOSingleObject);
+    // 3. Send item creation (k_ESOMsg_Create = 21)
+    uint32_t createMsg = k_ESOMsg_Create | ProtobufMask;
+    bool createSuccess = SendSOSingleObject(p2psocket, steamId, SOTypeItem, newItem, createMsg);
     if (!createSuccess)
     {
-        logger::error("HandleUnboxCrate: Failed to send item creation notification");
+        logger::error("HandleUnboxCrate: Failed to send item creation");
     }
     else
     {
-        logger::info("HandleUnboxCrate: Sent item creation (SOSingleObject) for item %llu", newItemId);
+        logger::info("HandleUnboxCrate: Sent item creation (ESOMsg_Create) for item %llu", newItemId);
     }
     
-    // 4. Finally send the UnlockCrateResponse for the animation
+    // 4. Send the UnlockCrateResponse for the animation completion
     bool unlockSuccess = SendSOSingleObject(p2psocket, steamId, SOTypeItem, newItem, k_EMsgGC_CC_GC2CL_UnlockCrateResponse);
     if (!unlockSuccess)
     {
@@ -1412,6 +1438,19 @@ bool GCNetwork_Inventory::HandleUnboxCrate(
     {
         logger::info("HandleUnboxCrate: Sent UnlockCrateResponse for item %llu", newItemId);
     }
+    
+    // Now actually delete the crate from database
+    char deleteQuery[256];
+    snprintf(deleteQuery, sizeof(deleteQuery),
+             "DELETE FROM csgo_items WHERE id = %llu AND owner_steamid2 = '%s'",
+             crateItemId, GCNetwork_Users::SteamID64ToSteamID2(steamId).c_str());
+    
+    if (mysql_query(inventory_db, deleteQuery) != 0)
+    {
+        logger::warning("HandleUnboxCrate: Failed to delete crate from database: %s", mysql_error(inventory_db));
+    }
+    
+    delete crateForDelete;
 
     delete crateItem;
     logger::info("HandleUnboxCrate: Successfully unboxed crate %llu for player %llu, got item %llu",
