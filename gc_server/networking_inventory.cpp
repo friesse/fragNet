@@ -1362,9 +1362,36 @@ bool GCNetwork_Inventory::HandleUnboxCrate(
     // setting id to newest
     newItem.set_id(newItemId);
 
-    // Send messages BEFORE deleting the crate to match expected client sequence:
+    // Send messages to match expected client sequence for case opening animation:
     
-    // 1. First send the item creation notification (k_EMsgGC_CC_GC2CL_SOSingleObject)
+    // 1. First simulate a key deletion (even though we're keyless, the animation expects this)
+    // Create a fake key item to satisfy the client's animation logic
+    CSOEconItem fakeKey;
+    fakeKey.set_id(99999999 + (crateItemId % 1000000)); // Generate unique fake key ID based on crate
+    fakeKey.set_account_id(steamId & 0xFFFFFFFF);
+    fakeKey.set_def_index(5028); // Standard CS:GO Case Key def_index
+    fakeKey.set_inventory(0);
+    fakeKey.set_quality(4);
+    fakeKey.set_rarity(3);
+    
+    // Send fake key deletion to trigger animation
+    bool keyDeleteSuccess = SendSOSingleObject(p2psocket, steamId, SOTypeItem, fakeKey, k_EMsgGC_CC_DeleteItem);
+    if (!keyDeleteSuccess)
+    {
+        logger::warning("HandleUnboxCrate: Failed to send fake key deletion");
+    }
+    else
+    {
+        logger::info("HandleUnboxCrate: Sent fake key deletion to trigger animation");
+    }
+    
+    // 2. Delete the crate (this sends the delete notification)
+    if (!DeleteItem(p2psocket, steamId, crateItemId, inventory_db))
+    {
+        logger::warning("HandleUnboxCrate: Failed to delete crate %llu after opening", crateItemId);
+    }
+    
+    // 3. Send the item creation notification (k_EMsgGC_CC_GC2CL_SOSingleObject)
     bool createSuccess = SendSOSingleObject(p2psocket, steamId, SOTypeItem, newItem, k_EMsgGC_CC_GC2CL_SOSingleObject);
     if (!createSuccess)
     {
@@ -1375,7 +1402,7 @@ bool GCNetwork_Inventory::HandleUnboxCrate(
         logger::info("HandleUnboxCrate: Sent item creation (SOSingleObject) for item %llu", newItemId);
     }
     
-    // 2. Then send the UnlockCrateResponse for the animation
+    // 4. Finally send the UnlockCrateResponse for the animation
     bool unlockSuccess = SendSOSingleObject(p2psocket, steamId, SOTypeItem, newItem, k_EMsgGC_CC_GC2CL_UnlockCrateResponse);
     if (!unlockSuccess)
     {
@@ -1384,12 +1411,6 @@ bool GCNetwork_Inventory::HandleUnboxCrate(
     else
     {
         logger::info("HandleUnboxCrate: Sent UnlockCrateResponse for item %llu", newItemId);
-    }
-    
-    // 3. Finally delete the crate (this sends the delete notification)
-    if (!DeleteItem(p2psocket, steamId, crateItemId, inventory_db))
-    {
-        logger::warning("HandleUnboxCrate: Failed to delete crate %llu after opening", crateItemId);
     }
 
     delete crateItem;
