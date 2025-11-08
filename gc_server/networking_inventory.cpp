@@ -1362,13 +1362,8 @@ bool GCNetwork_Inventory::HandleUnboxCrate(
     // setting id to newest
     newItem.set_id(newItemId);
 
-    // delete crate
-    if (!DeleteItem(p2psocket, steamId, crateItemId, inventory_db))
-    {
-        logger::warning("HandleUnboxCrate: Failed to delete crate %llu after opening", crateItemId);
-    }
-
-    // Send BOTH messages that the client expects:
+    // Send messages BEFORE deleting the crate to match expected client sequence:
+    
     // 1. First send the item creation notification (k_EMsgGC_CC_GC2CL_SOSingleObject)
     bool createSuccess = SendSOSingleObject(p2psocket, steamId, SOTypeItem, newItem, k_EMsgGC_CC_GC2CL_SOSingleObject);
     if (!createSuccess)
@@ -1389,6 +1384,12 @@ bool GCNetwork_Inventory::HandleUnboxCrate(
     else
     {
         logger::info("HandleUnboxCrate: Sent UnlockCrateResponse for item %llu", newItemId);
+    }
+    
+    // 3. Finally delete the crate (this sends the delete notification)
+    if (!DeleteItem(p2psocket, steamId, crateItemId, inventory_db))
+    {
+        logger::warning("HandleUnboxCrate: Failed to delete crate %llu after opening", crateItemId);
     }
 
     delete crateItem;
